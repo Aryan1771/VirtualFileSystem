@@ -1,0 +1,6 @@
+build/
+cmake-build-*/
+virtual_disk.dat
+virtual_disk.dat.journal
+virtual_disk.dat.journal.tmp
+*.vfs-test*
