@@ -49,7 +49,7 @@ Keep the disk image and its `.journal` file together when moving or backing up a
 
 ## Commands
 
-The prompt shows the active user and current virtual directory. Paths are rooted at `/`; relative paths are resolved from the directory shown in the prompt, and `.` / `..` cannot escape the virtual root. Commands accept quoted text; within quotes, `\n`, `\r`, and `\t` represent newline, carriage return, and tab. Linux-like commands operate only on the simulated disk, never on host files.
+The prompt shows the active user and current virtual directory. Paths are rooted at `/`; relative paths are resolved from the directory shown in the prompt, and `.` / `..` cannot escape the virtual root. Commands accept quoted text; within quotes, `\n`, `\r`, and `\t` represent newline, carriage return, and tab. Linux-like commands operate on the simulated disk; `export` is the explicit command for copying virtual data to host files.
 
 | Command | Purpose |
 | --- | --- |
@@ -70,6 +70,7 @@ The prompt shows the active user and current virtual directory. Paths are rooted
 | `tree [PATH]` | Display nested files and directories |
 | `find [PATH] NAME` | Recursively find names containing text |
 | `cp SOURCE DEST` | Copy a virtual file |
+| `export PATH HOST_PATH [--force]` | Copy a virtual file or nested directory to the host computer |
 | `rmdir PATH` | Remove an empty directory |
 | `stat PATH` | Display entry metadata |
 | `mv SOURCE DEST` | Rename or move a file/directory |
@@ -98,7 +99,11 @@ The prompt shows the active user and current virtual directory. Paths are rooted
 | `license` | Print the bundled GPL-3.0 license |
 | `help` / `exit` | Show commands / quit |
 
-`man` documents the built-in commands. This is a focused Linux-style filesystem CLI, not a general-purpose shell: commands run only against the virtual disk. Output redirection is supported; pipes, executable programs, and host filesystem access are outside its scope.
+`man` documents the built-in commands. This is a focused Linux-style filesystem CLI, not a general-purpose shell: filesystem commands operate on the virtual disk. `export` writes a virtual file or directory tree to an explicitly chosen host path. Existing targets are refused unless `--force` is supplied; force mode replaces matching files while keeping unrelated files. Output redirection writes to the virtual disk; pipes and executable programs are outside its scope.
+
+### Exporting to the host computer
+
+Use `export VIRTUAL_PATH HOST_PATH` to copy a virtual file to a local path, or recursively copy a virtual directory and its nested contents. Quote host paths containing spaces, for example `export /reports/summary.csv "C:/Users/Student/Desktop/summary.csv"`. Existing destination paths are refused by default. Add `--force` to replace matching files; unrelated files in an existing destination directory are retained. The simulator checks virtual read permissions before writing the export.
 
 ### CSV analysis
 

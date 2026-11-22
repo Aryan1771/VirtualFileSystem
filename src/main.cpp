@@ -28,7 +28,11 @@ std::vector<std::string> tokenize(const std::string& line) {
             if (character == 'n') token.push_back('\n');
             else if (character == 'r') token.push_back('\r');
             else if (character == 't') token.push_back('\t');
-            else token.push_back(character);
+            else if (character == '\\' || character == '"') token.push_back(character);
+            else {
+                token.push_back('\\');
+                token.push_back(character);
+            }
             escaped = false;
             started = true;
         } else if (quoted && character == '\\') {
@@ -193,6 +197,7 @@ void showHelp() {
         << "  tree [PATH]                               Display nested virtual entries\n"
         << "  find [PATH] NAME                          Find entries by name substring\n"
         << "  cp SOURCE DEST                            Copy a virtual file\n"
+        << "  export PATH HOST_PATH [--force]           Save a virtual file/tree to the host computer\n"
         << "  rmdir PATH                                Remove an empty directory\n"
         << "  stat PATH                                 Show file or directory metadata\n"
         << "  mv SOURCE DESTINATION                     Rename or move an entry\n"
@@ -225,7 +230,7 @@ void showMan(const std::string& command) {
         std::cout << "Virtual File System manual\n"
                   << "Pages: cd pwd ls tree find mkdir touch cp cat head tail wc echo grep sort uniq cut write append mv rm rmdir "
                      "chmod stat useradd su whoami access df schedule cache-policy cache-stats "
-                     "concurrent-read csv-info describe freq filter select groupby histogram join log crash-write clear license help exit\n"
+                     "concurrent-read export csv-info describe freq filter select groupby histogram join log crash-write clear license help exit\n"
                   << "Use man COMMAND for syntax. Paths are rooted at / inside the virtual disk.\n";
         return;
     }
@@ -237,6 +242,7 @@ void showMan(const std::string& command) {
     else if (command == "mkdir") std::cout << "mkdir PATH - create one virtual directory; its parent must exist.\n";
     else if (command == "touch") std::cout << "touch PATH - create an empty virtual file; existing files are not truncated.\n";
     else if (command == "cp") std::cout << "cp SOURCE DEST - copy a virtual file to a new path.\n";
+    else if (command == "export") std::cout << "export PATH HOST_PATH [--force] - copy a virtual file or directory tree to the host computer. Existing destinations are preserved unless --force is given; unrelated files in destination directories are never removed. Quote paths containing spaces.\n";
     else if (command == "cat") std::cout << "cat PATH - print the contents of a virtual text file.\n";
     else if (command == "head") std::cout << "head [-n COUNT] PATH - print the first COUNT lines (default 10) from a virtual file.\n";
     else if (command == "tail") std::cout << "tail [-n COUNT] PATH - print the last COUNT lines (default 10) from a virtual file.\n";
@@ -315,6 +321,69 @@ void printEntry(const vfs::EntryInfo& entry) {
     std::cout << type << permissionText(entry.permissions) << "  "
               << entry.owner << "  " << entry.size << " B  "
               << entry.allocatedBlocks << " blocks  " << entry.path << '\n';
+}
+
+struct ExportItem {
+    std::string virtualPath;
+    std::filesystem::path hostPath;
+    bool directory;
+    std::string contents;
+};
+
+void collectExportItems(vfs::VirtualFileSystem& filesystem,
+                        const std::string& virtualPath,
+                        const std::filesystem::path& hostPath,
+                        std::vector<ExportItem>& items) {
+    const auto entry = filesystem.stat(virtualPath);
+    items.push_back({virtualPath, hostPath, entry.directory,
+                     entry.directory ? std::string{} : filesystem.readFile(virtualPath)});
+    if (!entry.directory) return;
+    for (const auto& child : filesystem.list(virtualPath)) {
+        collectExportItems(filesystem, child.path,
+                           hostPath / baseName(child.path), items);
+    }
+}
+
+void exportToHost(vfs::VirtualFileSystem& filesystem,
+                  const std::string& virtualPath,
+                  const std::filesystem::path& hostPath,
+                  bool force) {
+    if (hostPath.empty()) throw std::invalid_argument("host destination cannot be empty");
+    std::vector<ExportItem> items;
+    collectExportItems(filesystem, virtualPath, hostPath, items);
+
+    // Validate every target before writing, avoiding partial exports on conflicts.
+    for (const auto& item : items) {
+        std::error_code error;
+        const bool exists = std::filesystem::exists(item.hostPath, error);
+        if (error) throw std::runtime_error("cannot inspect destination: " + item.hostPath.string());
+        if (!exists) continue;
+        const bool isDirectory = std::filesystem::is_directory(item.hostPath, error);
+        if (error) throw std::runtime_error("cannot inspect destination: " + item.hostPath.string());
+        if (item.directory != isDirectory)
+            throw std::runtime_error("destination type conflicts with virtual entry: " + item.hostPath.string());
+        if (!force)
+            throw std::runtime_error("destination already exists (use --force to overwrite): " + item.hostPath.string());
+    }
+
+    for (const auto& item : items) {
+        if (item.directory) {
+            std::error_code error;
+            std::filesystem::create_directories(item.hostPath, error);
+            if (error) throw std::runtime_error("cannot create destination directory: " + item.hostPath.string());
+            continue;
+        }
+        if (!item.hostPath.parent_path().empty()) {
+            std::error_code error;
+            std::filesystem::create_directories(item.hostPath.parent_path(), error);
+            if (error) throw std::runtime_error("cannot create destination parent: " + item.hostPath.parent_path().string());
+        }
+        std::ofstream output(item.hostPath, std::ios::binary | std::ios::trunc);
+        if (!output) throw std::runtime_error("cannot open destination for writing: " + item.hostPath.string());
+        output.write(item.contents.data(), static_cast<std::streamsize>(item.contents.size()));
+        output.close();
+        if (!output) throw std::runtime_error("failed writing destination: " + item.hostPath.string());
+    }
 }
 
 void execute(vfs::VirtualFileSystem& filesystem,
@@ -404,6 +473,15 @@ void execute(vfs::VirtualFileSystem& filesystem,
             std::cout << tokens[index];
         }
         std::cout << '\n';
+    } else if (command == "export") {
+        if (tokens.size() != 3 && tokens.size() != 4)
+            throw std::invalid_argument("usage: export PATH HOST_PATH [--force]");
+        const bool force = tokens.size() == 4 && tokens[3] == "--force";
+        if (tokens.size() == 4 && !force)
+            throw std::invalid_argument("usage: export PATH HOST_PATH [--force]");
+        const auto virtualPath = resolvePath(tokens[1], currentDirectory);
+        exportToHost(filesystem, virtualPath, std::filesystem::path(tokens[2]), force);
+        std::cout << "exported " << virtualPath << " to " << tokens[2] << '\n';
     } else if (command == "grep") {
         const bool ignoreCase = tokens.size() == 4 && tokens[1] == "-i";
         if ((!ignoreCase && tokens.size() != 3) || (ignoreCase && tokens.size() != 4))
