@@ -13,7 +13,7 @@ A C++17 command-line simulation of a small persistent file system. It stores a v
 - FCFS, SSTF, SCAN, and C-SCAN disk request scheduling with total head movement.
 - A session operation log and validation of image signature, version, checksum, allocation map, and paths at mount.
 
-The simulator is intended for operating-systems coursework. It does not mount a real disk or provide production-grade security or hardware-failure guarantees.
+The simulator is intended for operating-systems coursework. It does not mount a real disk or provide production-grade security or hardware-failure guarantees. In particular, `crash-write` demonstrates recovery after a journaled interruption; it does not simulate power loss or guarantee physical-media durability.
 
 ## Build
 
@@ -39,7 +39,7 @@ ctest --test-dir build --output-on-failure
 ./build/vfs
 ```
 
-On the first run, the program creates a 512-block disk with 512-byte blocks and an `admin` user. To choose a different image or capacity, pass `--disk FILE` and `--blocks COUNT` on the first run. Existing images retain their stored capacity.
+On the first run, the program creates a 512-block disk with 512-byte blocks and an `admin` user. The supported disk size is 1 to 16,384 blocks. To choose a different image or capacity, pass `--disk FILE` and `--blocks COUNT` on the first run. Existing images retain their stored capacity; a non-default requested capacity must match the image.
 
 ```sh
 vfs --disk lab_disk.dat --blocks 1024
@@ -90,6 +90,19 @@ vfs[student]> cat /docs/readme.txt
 Persistent data
 ```
 
+For example, compare scheduling policies on the same request queue:
+
+```text
+vfs[admin]> schedule FCFS 25 10,45,5
+service order: 10 45 5
+head movement: 90 blocks
+vfs[admin]> schedule SSTF 25 10,45,5
+service order: 10 5 45
+head movement: 60 blocks
+```
+
+Scheduling results are model calculations over block numbers. The cache commands similarly track simulated block identifiers and report replacement-policy hits and misses; they do not represent a hardware disk scheduler or cache of file bytes.
+
 ## Crash recovery demonstration
 
 Create a file and write its initial contents, then run `crash-write`:
@@ -117,6 +130,21 @@ The journal contains a complete checksummed image. On startup, recovery validate
 - Mutations operate on a candidate state. The candidate image is written to the journal before the disk image, so an interrupted commit can be replayed.
 - A mutex protects shared filesystem state. `WorkerPool` uses a task queue, condition variable, and worker threads to demonstrate concurrent requests safely.
 - The standalone algorithms module implements FIFO/LRU cache behavior and disk scheduling.
+
+### Source layout
+
+| Path | Responsibility |
+| --- | --- |
+| `src/main.cpp` | CLI parsing, command dispatch, and reports |
+| `src/vfs.cpp` | Virtual paths, directory entries, permissions, allocation, persistence, and recovery |
+| `src/algorithms.cpp` | FIFO/LRU cache accounting and disk scheduling algorithms |
+| `src/worker_pool.cpp` | Worker lifecycle, task queue, and condition-variable synchronization |
+| `include/` | Public interfaces for the filesystem, algorithms, and worker pool |
+| `tests/test_vfs.cpp` | Automated behavior and regression coverage |
+
+### Persistence sequence
+
+Each mutation serializes a candidate image with its checksum, writes the journal, then replaces the disk image. A normal successful commit removes the journal. If the process exits after journaling but before replacing the disk image, the next start validates and replays the journal. The journal and disk image should be backed up or moved together.
 
 ## Tests
 

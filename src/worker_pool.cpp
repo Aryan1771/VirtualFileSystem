@@ -10,8 +10,22 @@ WorkerPool::WorkerPool(std::size_t threadCount) {
         throw std::invalid_argument("worker count must be positive");
     }
     workers_.reserve(threadCount);
-    for (std::size_t index = 0; index < threadCount; ++index) {
-        workers_.emplace_back([this] { run(); });
+    try {
+        for (std::size_t index = 0; index < threadCount; ++index) {
+            workers_.emplace_back([this] { run(); });
+        }
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            stopping_ = true;
+        }
+        ready_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        throw;
     }
 }
 
