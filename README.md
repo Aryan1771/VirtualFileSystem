@@ -15,6 +15,12 @@ A C++17 command-line simulation of a small persistent file system. It stores a v
 
 The simulator is intended for operating-systems coursework. It does not mount a real disk or provide production-grade security or hardware-failure guarantees. In particular, `crash-write` demonstrates recovery after a journaled interruption; it does not simulate power loss or guarantee physical-media durability.
 
+## Run without developer setup
+
+Ready-to-run bundles are provided for common desktop systems. On Windows 10/11 x64, open `portable/windows-x64` and double-click `Run VFS.bat`; the repository includes a self-contained executable. For Linux x64/ARM64 and macOS Intel/Apple silicon, download the matching `vfs-<platform>` artifact from the latest successful **Portable builds** run in the GitHub Actions tab. The Linux/macOS artifact is a `.tar.gz` bundle; extract it, then start it with its included launcher. These builds need no compiler, CMake, package manager, or third-party runtime installation. Keep the extracted folder writable; the virtual disk image is created beside the program.
+
+The workflow builds and tests Windows x64, Linux x64/ARM64, and macOS Intel/Apple silicon on pushes. Separate executables are required for different operating systems and processor types, so there is no single binary for every computer. The Linux build targets the Ubuntu 22.04 system-library baseline; older or unusual distributions may not be compatible.
+
 ## Build
 
 Requirements: CMake 3.16+, a C++17 compiler, and Ninja or another CMake generator.

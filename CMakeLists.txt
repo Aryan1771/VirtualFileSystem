@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
+# Statically link the MSVC runtime so the Windows bundle does not need the
+# Visual C++ Redistributable installed separately.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 project(VirtualFileSystem LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
@@ -22,6 +25,13 @@ else()
 endif()
 add_executable(vfs src/main.cpp)
 target_link_libraries(vfs PRIVATE vfs_core)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_options(vfs PRIVATE -static-libgcc -static-libstdc++)
+endif()
+if(MINGW)
+    # Also include the MinGW thread runtime in the Windows release executable.
+    target_link_options(vfs PRIVATE -static)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
