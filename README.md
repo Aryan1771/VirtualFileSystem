@@ -6,12 +6,12 @@ A C++17 command-line simulation of a small persistent file system. It stores a v
 
 - Nested directories and file create, read, overwrite, append, rename, and recursive removal.
 - A fixed-size block device backed by `virtual_disk.dat`, bitmap allocation, free-space reporting, and free-extent fragmentation metrics.
-- Per-entry read, write, and execute bits; `admin` manages users, while owners and `admin` can change permissions.
+- Owner, group, and other read/write/execute permissions; simulated groups, group membership, and owner/group permission administration.
 - A write-ahead journal that replays a fully written transaction after a simulated interruption.
 - Thread-safe operations and a condition-variable worker pool for concurrent reads.
 - FIFO and LRU block-cache policies with hit and miss counters.
 - FCFS, SSTF, SCAN, and C-SCAN disk request scheduling with total head movement.
-- A session operation log and validation of image signature, version, checksum, allocation map, and paths at mount.
+- A session operation log, command history, import/export, persistent timestamps, content checksums, filesystem integrity checks, and journal inspection.
 
 The simulator is intended for operating-systems coursework. It does not mount a real disk or provide production-grade security or hardware-failure guarantees. In particular, `crash-write` demonstrates recovery after a journaled interruption; it does not simulate power loss or guarantee physical-media durability.
 
@@ -71,13 +71,19 @@ The prompt shows the active user and current virtual directory. Paths are rooted
 | `find [PATH] NAME` | Recursively find names containing text |
 | `cp SOURCE DEST` | Copy a virtual file |
 | `export PATH HOST_PATH [--force]` | Copy a virtual file or nested directory to the host computer |
+| `import HOST_PATH VFS_PATH` | Copy a host file or folder tree into the virtual disk |
+| `source HOST_SCRIPT` | Run commands from a text script (maximum nesting: 8) |
+| `history` | Show recent commands from this session |
+| `addgroup GROUP` / `groupadd USER GROUP` / `chgrp PATH GROUP` | Manage simulated groups and entry group ownership |
+| `chmod PATH OWNER GROUP OTHER` | Set three `rwx` permission classes |
+| `fsck` / `journal` | Validate image invariants / inspect pending recovery |
 | `rmdir PATH` | Remove an empty directory |
 | `stat PATH` | Display entry metadata |
 | `mv SOURCE DEST` | Rename or move a file/directory |
 | `rm PATH` / `rm -r PATH` | Remove a file / recursively remove an entry tree |
 | `useradd NAME` | Add a user (admin only) |
 | `su USER` | Switch the active user |
-| `chmod PATH rwx` | Set permission bits; use `-` to clear a bit |
+| `chmod PATH OWNER GROUP OTHER` | Set owner/group/other `rwx` bits; use `-` to clear bits |
 | `access PATH r|w|x` | Check read, write, or execute permission |
 | `df` | Report used/free blocks and free extents |
 | `cache-policy FIFO` / `cache-policy LRU` | Choose cache replacement policy |
@@ -94,7 +100,9 @@ The prompt shows the active user and current virtual directory. Paths are rooted
 | `filter PATH COLUMN OP VALUE` | Filter CSV rows |
 | `select PATH COLUMN[,COLUMN...]` | Select CSV columns |
 | `groupby PATH KEY [VALUE_COLUMN]` | Count categories or aggregate numeric groups |
-| `histogram PATH COLUMN [BINS]` | Bin numeric CSV values |
+| `histogram PATH COLUMN [BINS]` / `plot PATH COLUMN [BINS]` | Tabulate bins / draw an ASCII histogram |
+| `correlate PATH X Y` / `regress PATH X Y` | Pearson correlation / least-squares line |
+| `dropna SOURCE DEST COLUMNS` | Write a dataset without rows missing selected values |
 | `join LEFT RIGHT KEY` | Inner-join CSV files on a shared header |
 | `license` | Print the bundled GPL-3.0 license |
 | `help` / `exit` | Show commands / quit |
@@ -105,9 +113,21 @@ The prompt shows the active user and current virtual directory. Paths are rooted
 
 Use `export VIRTUAL_PATH HOST_PATH` to copy a virtual file to a local path, or recursively copy a virtual directory and its nested contents. Quote host paths containing spaces, for example `export /reports/summary.csv "C:/Users/Student/Desktop/summary.csv"`. Existing destination paths are refused by default. Add `--force` to replace matching files; unrelated files in an existing destination directory are retained. The simulator checks virtual read permissions before writing the export.
 
+### Import, scripts, and history
+
+`import HOST_PATH VFS_PATH` copies a regular host file or recursively imports a directory tree. The virtual destination must not already exist, and its parent must exist. Symbolic links and special host files are rejected. Import rolls back created virtual entries if a write fails. `source HOST_SCRIPT` runs one VFS command per line; blank lines and lines beginning with `#` are ignored, and nested scripts are limited to eight levels. Scripts use the same virtual paths and permissions as interactive commands. `history` shows up to 100 recent commands from the current process session.
+
+### Groups and permissions
+
+Each entry stores owner, group, and other permission bits in `rwx` order. For example, `chmod /reports/data.csv rw- r-- ---` grants owner read/write, group read, and no access to other users. Use `addgroup analysts`, `groupadd student analysts`, and `chgrp /reports/data.csv analysts` to create a group, add a member, and assign an entry's group. New users join the default `users` group. `admin` bypasses simulated permissions. Older VFS2 disk images are migrated in memory and written in the newer format at the next mutation; their old permission bits remain owner-only.
+
+### Metadata and recovery diagnostics
+
+`stat PATH` and `ls -l` show entry type, owner/group, all three permission classes, size, allocated blocks, creation/modification timestamps, and a content checksum. `fsck` validates the mounted state and persisted disk image structure, allocation map, and paths. `journal` reports whether a recovery journal is pending and whether its image validates; it does not replay or alter the journal. Startup recovery remains automatic.
+
 ### CSV analysis
 
-CSV files use the first row as headers, require a consistent number of fields per row, and support quoted fields, escaped quotes, and embedded newlines. Column arguments accept a header name or a 1-based column number. Numeric summaries skip empty values and report population standard deviation. Filter operators are `=`, `!=`, `>`, `>=`, `<`, `<=`, and `contains`.
+CSV files use the first row as headers, require a consistent number of fields per row, and support quoted fields, escaped quotes, and embedded newlines. Column arguments accept a header name or a 1-based column number. Numeric summaries skip empty values and report population standard deviation. `correlate` reports Pearson correlation for paired numeric rows, `regress` reports least-squares slope/intercept/R-squared, `dropna` writes a cleaned copy excluding rows blank in selected columns, and `plot` draws a scaled terminal histogram. Filter operators are `=`, `!=`, `>`, `>=`, `<`, `<=`, and `contains`.
 
 ```text
 vfs[admin]:/> write /sales.csv "region,amount\nWest,120\nEast,75\nWest,90"
@@ -162,7 +182,7 @@ vfs[admin]> crash-write /pending.txt "after"
 simulated crash: pending transaction is journaled; restart to recover
 ```
 
-The command returns exit code 77 and leaves `virtual_disk.dat.journal` in place. Start the same disk again and inspect the recovered value:
+The command returns exit code 77 and leaves `virtual_disk.dat.journal` in place. Run `journal` before restarting to validate the pending transaction. Start the same disk again and inspect the recovered value:
 
 ```text
 vfs[admin]> cat /pending.txt

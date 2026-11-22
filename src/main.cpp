@@ -10,12 +10,18 @@
 #include <fstream>
 #include <iostream>
 #include <iomanip>
+#include <ctime>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
+
+std::vector<std::string> commandHistory;
+void recordHistory(const std::string& line) { commandHistory.push_back(line); if (commandHistory.size() > 1000) commandHistory.erase(commandHistory.begin()); }
+std::size_t scriptDepth = 0;
+void executeWithRedirection(vfs::VirtualFileSystem&, const std::vector<std::string>&, std::string&);
 
 std::vector<std::string> tokenize(const std::string& line) {
     std::vector<std::string> tokens;
@@ -176,6 +182,10 @@ void showHelp() {
         << "Commands:\n"
         << "  help                                      Show commands\n"
         << "  useradd NAME                              Add a user (admin only)\n"
+        << "  addgroup GROUP                            Create a group (admin only)\n"
+        << "  groupadd USER GROUP                      Add a user to a group (admin only)\n"
+        << "  chgrp PATH GROUP                          Set an entry's group (owner/admin)\n"
+        << "  groups                                    List groups\n"
         << "  su USER                                   Switch active user\n"
         << "  whoami                                    Show active user\n"
         << "  pwd                                       Show the current virtual directory\n"
@@ -202,13 +212,19 @@ void showHelp() {
         << "  stat PATH                                 Show file or directory metadata\n"
         << "  mv SOURCE DESTINATION                     Rename or move an entry\n"
         << "  rm PATH | rm -r PATH                      Remove a file or directory tree\n"
-        << "  chmod PATH rwx                            Set permission bits (use - to clear)\n"
+        << "  chmod PATH OWNER GROUP OTHER              Set rwx bits for each permission class\n"
+        << "  chgrp PATH GROUP                          Set the simulated owning group\n"
         << "  access PATH r|w|x                         Check a permission bit\n"
         << "  df                                        Show block use and fragmentation\n"
         << "  cache-policy FIFO|LRU                     Select cache replacement policy\n"
         << "  cache-stats                               Show cache hits and misses\n"
         << "  schedule ALG HEAD R1,R2,... [up|down]     Simulate disk scheduling\n"
         << "  concurrent-read PATH [PATH ...]           Read files on worker threads\n"
+        << "  import HOST_PATH VFS_PATH                 Import a host file or folder tree\n"
+        << "  source HOST_SCRIPT                       Run a file of VFS commands\n"
+        << "  history                                   Show recent commands in this session\n"
+        << "  fsck                                      Check the mounted virtual disk\n"
+        << "  journal                                   Inspect a pending recovery journal\n"
         << "  log                                       Show this session's operation log\n"
         << "  license                                   Display the bundled GPL-3.0 license\n"
         << "  man [COMMAND]                             Show built-in command documentation\n"
@@ -220,6 +236,10 @@ void showHelp() {
         << "  select PATH COLUMN[,COLUMN...]            Select CSV columns\n"
         << "  groupby PATH KEY [VALUE_COLUMN]            Count groups or aggregate numbers\n"
         << "  histogram PATH COLUMN [BINS]               Bin numeric CSV values\n"
+        << "  plot PATH COLUMN [BINS]                    Draw a terminal histogram\n"
+        << "  correlate PATH X Y                         Calculate Pearson correlation\n"
+        << "  regress PATH X Y                           Fit a simple linear regression\n"
+        << "  dropna SOURCE DEST COLUMNS                 Remove rows missing selected CSV values\n"
         << "  join LEFT RIGHT KEY                       Inner-join CSV files on a shared column\n"
         << "  crash-write PATH \"TEXT\"                   Leave a journal for next-run recovery\n"
         << "  exit                                      Quit\n";
@@ -229,8 +249,8 @@ void showMan(const std::string& command) {
     if (command.empty()) {
         std::cout << "Virtual File System manual\n"
                   << "Pages: cd pwd ls tree find mkdir touch cp cat head tail wc echo grep sort uniq cut write append mv rm rmdir "
-                     "chmod stat useradd su whoami access df schedule cache-policy cache-stats "
-                     "concurrent-read export csv-info describe freq filter select groupby histogram join log crash-write clear license help exit\n"
+                     "chmod chgrp stat useradd addgroup groupadd groups su whoami access df schedule cache-policy cache-stats "
+                     "concurrent-read export import source history fsck journal csv-info describe freq filter select groupby histogram plot correlate regress dropna join log crash-write clear license help exit\n"
                   << "Use man COMMAND for syntax. Paths are rooted at / inside the virtual disk.\n";
         return;
     }
@@ -257,7 +277,7 @@ void showMan(const std::string& command) {
     else if (command == "mv") std::cout << "mv SOURCE DEST - rename or move a virtual entry.\n";
     else if (command == "rm") std::cout << "rm PATH removes a file; rm -r PATH removes a directory tree.\n";
     else if (command == "rmdir") std::cout << "rmdir PATH - remove an empty virtual directory.\n";
-    else if (command == "chmod") std::cout << "chmod PATH rwx - set the simulator's owner read/write/execute bits, such as rw-. This is not full Unix mode handling.\n";
+    else if (command == "chmod") std::cout << "chmod PATH OWNER GROUP OTHER - set rwx or --- permission bits for each class, for example chmod /file rw- r-- ---.\n";
     else if (command == "stat") std::cout << "stat PATH - show metadata for a virtual entry.\n";
     else if (command == "useradd") std::cout << "useradd NAME - add a simulated user (admin only).\n";
     else if (command == "su") std::cout << "su USER - switch the active simulated user.\n";
@@ -273,7 +293,20 @@ void showMan(const std::string& command) {
     else if (command == "filter") std::cout << "filter PATH COLUMN OP VALUE - filter CSV rows using =, !=, >, >=, <, <=, or contains. Numeric comparisons are numeric when both values parse as numbers.\n";
     else if (command == "select") std::cout << "select PATH COLUMN[,COLUMN...] - project CSV columns by header name or 1-based index.\n";
     else if (command == "groupby") std::cout << "groupby PATH KEY [VALUE_COLUMN] - count groups or report per-group count, sum, and mean for a numeric column.\n";
-    else if (command == "histogram") std::cout << "histogram PATH COLUMN [BINS] - print a numeric histogram with 1 to 1000 bins (default 10).\n";
+    else if (command == "histogram") std::cout << "histogram PATH COLUMN [BINS] - print numeric bin counts.\n";
+    else if (command == "plot") std::cout << "plot PATH COLUMN [BINS] - draw a scaled ASCII histogram.\n";
+    else if (command == "import") std::cout << "import HOST_PATH VFS_PATH - copy a regular file or directory tree into the virtual disk; symbolic links are skipped with an error.\n";
+    else if (command == "source") std::cout << "source HOST_SCRIPT - execute lines from a plain-text script; nested sourcing is limited to 8 levels.\n";
+    else if (command == "history") std::cout << "history - show up to 100 recent commands from this session.\n";
+    else if (command == "correlate") std::cout << "correlate PATH X Y - compute Pearson r for numeric row pairs.\n";
+    else if (command == "regress") std::cout << "regress PATH X Y - report least-squares slope, intercept, and R-squared.\n";
+    else if (command == "dropna") std::cout << "dropna SOURCE DEST COLUMNS - write a copy excluding rows blank in any selected column.\n";
+    else if (command == "fsck") std::cout << "fsck - validate the current virtual image invariants.\n";
+    else if (command == "journal") std::cout << "journal - inspect a pending recovery journal; it does not change or replay it.\n";
+    else if (command == "addgroup") std::cout << "addgroup GROUP - create a simulated group (admin only).\n";
+    else if (command == "groupadd") std::cout << "groupadd USER GROUP - add an existing user to a group (admin only).\n";
+    else if (command == "chgrp") std::cout << "chgrp PATH GROUP - set an entry's group (owner or admin).\n";
+    else if (command == "groups") std::cout << "groups - list simulated group names.\n";
     else if (command == "join") std::cout << "join LEFT RIGHT KEY - inner-join two CSV files using the same named key column in both.\n";
     else if (command == "concurrent-read") std::cout << "concurrent-read PATH [PATH ...] - read virtual files using worker threads.\n";
     else if (command == "log") std::cout << "log - display this session's operation log.\n";
@@ -316,11 +349,19 @@ void showLicense() {
     std::cout << input.rdbuf();
 }
 
+std::string timeText(std::uint64_t milliseconds);
+
 void printEntry(const vfs::EntryInfo& entry) {
-    const char type = entry.directory ? 'd' : '-';
-    std::cout << type << permissionText(entry.permissions) << "  "
-              << entry.owner << "  " << entry.size << " B  "
-              << entry.allocatedBlocks << " blocks  " << entry.path << '\n';
+    const auto type = entry.directory ? std::string("directory") :
+        (std::filesystem::path(entry.path).has_extension() ? std::filesystem::path(entry.path).extension().string() : "file");
+    std::cout << type << "  " << permissionText(entry.permissions) << '/'
+              << permissionText(entry.groupPermissions) << '/' << permissionText(entry.otherPermissions)
+              << "  " << entry.owner << ':' << entry.group << "  " << entry.size << " B  "
+              << entry.allocatedBlocks << " blocks  created " << timeText(entry.createdMs)
+              << "  modified " << timeText(entry.modifiedMs) << "  checksum ";
+    if (entry.directory) std::cout << '-';
+    else std::cout << std::hex << std::setw(8) << std::setfill('0') << entry.checksum << std::dec << std::setfill(' ');
+    std::cout << "  " << entry.path << '\n';
 }
 
 struct ExportItem {
@@ -384,6 +425,75 @@ void exportToHost(vfs::VirtualFileSystem& filesystem,
         output.close();
         if (!output) throw std::runtime_error("failed writing destination: " + item.hostPath.string());
     }
+}
+
+struct HostImportItem { std::filesystem::path source; std::string destination; bool directory; std::string contents; };
+
+void collectHostImport(const std::filesystem::path& source, const std::string& destination,
+                       std::vector<HostImportItem>& items) {
+    const auto status = std::filesystem::symlink_status(source);
+    if (std::filesystem::is_symlink(status)) throw std::runtime_error("import does not follow host symbolic links: " + source.string());
+    if (std::filesystem::is_directory(status)) {
+        items.push_back({source, destination, true, {}});
+        std::vector<std::filesystem::path> children;
+        for (const auto& child : std::filesystem::directory_iterator(source)) children.push_back(child.path());
+        std::sort(children.begin(), children.end());
+        for (const auto& child : children)
+            collectHostImport(child, destination + "/" + child.filename().string(), items);
+        return;
+    }
+    if (!std::filesystem::is_regular_file(status)) throw std::runtime_error("import supports regular files and directories only: " + source.string());
+    std::ifstream input(source, std::ios::binary);
+    if (!input) throw std::runtime_error("cannot read host file: " + source.string());
+    std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    items.push_back({source, destination, false, std::move(contents)});
+}
+
+void importFromHost(vfs::VirtualFileSystem& filesystem, const std::filesystem::path& source,
+                    const std::string& destination) {
+    if (destination == "/") throw std::invalid_argument("cannot import over the virtual root");
+    std::vector<HostImportItem> items;
+    collectHostImport(source, destination, items);
+    const auto parent = destination == "/" ? "/" : destination.substr(0, destination.find_last_of('/') == 0 ? 1 : destination.find_last_of('/'));
+    if (!filesystem.stat(parent).directory) throw std::runtime_error("virtual destination parent is not a directory");
+    for (const auto& item : items) {
+        try { (void)filesystem.stat(item.destination); throw std::runtime_error("virtual destination already exists: " + item.destination); }
+        catch (const std::runtime_error& error) {
+            if (std::string(error.what()).find("path does not exist:") != 0) throw;
+        }
+    }
+    std::vector<std::string> created;
+    try {
+        for (const auto& item : items) {
+            if (item.directory) filesystem.makeDirectory(item.destination);
+            else {
+                filesystem.createFile(item.destination);
+                created.push_back(item.destination);
+                filesystem.writeFile(item.destination, item.contents);
+                continue;
+            }
+            created.push_back(item.destination);
+        }
+    } catch (...) {
+        for (auto item = created.rbegin(); item != created.rend(); ++item) {
+            try { filesystem.removePath(*item); } catch (...) {}
+        }
+        throw;
+    }
+}
+
+std::string timeText(std::uint64_t milliseconds) {
+    if (milliseconds == 0) return "unknown";
+    const auto seconds = static_cast<std::time_t>(milliseconds / 1000);
+    std::tm value{};
+#ifdef _WIN32
+    localtime_s(&value, &seconds);
+#else
+    localtime_r(&seconds, &value);
+#endif
+    std::ostringstream output;
+    output << std::put_time(&value, "%Y-%m-%d %H:%M:%S");
+    return output.str();
 }
 
 void execute(vfs::VirtualFileSystem& filesystem,
@@ -542,6 +652,85 @@ void execute(vfs::VirtualFileSystem& filesystem,
             }
             std::cout << '\n';
         }
+    } else if (command == "correlate" || command == "regress") {
+        requireCount(tokens, 4, command + " PATH X_COLUMN Y_COLUMN");
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(resolvePath(tokens[1], currentDirectory)));
+        const auto x = vfs::analytics::columnIndex(table, tokens[2]);
+        const auto y = vfs::analytics::columnIndex(table, tokens[3]);
+        if (command == "correlate")
+            std::cout << "pearson_r," << vfs::analytics::correlation(table, x, y) << '\n';
+        else {
+            const auto model = vfs::analytics::regress(table, x, y);
+            std::cout << "count,slope,intercept,r_squared\n" << model.count << ',' << model.slope << ','
+                      << model.intercept << ',' << model.rSquared << '\n';
+        }
+    } else if (command == "dropna") {
+        if (tokens.size() != 4) throw std::invalid_argument("usage: dropna SOURCE DEST COLUMN[,COLUMN...]");
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(resolvePath(tokens[1], currentDirectory)));
+        std::vector<std::size_t> columns;
+        for (const auto& name : split(tokens[3], ',')) columns.push_back(vfs::analytics::columnIndex(table, name));
+        const auto output = vfs::analytics::writeCsv(vfs::analytics::dropMissing(table, columns));
+        const auto destination = resolvePath(tokens[2], currentDirectory);
+        filesystem.createFile(destination);
+        try { filesystem.writeFile(destination, output); }
+        catch (...) { filesystem.removePath(destination); throw; }
+        std::cout << "cleaned CSV written to " << destination << '\n';
+    } else if (command == "plot") {
+        if (tokens.size() < 3 || tokens.size() > 4) throw std::invalid_argument("usage: plot PATH COLUMN [BINS]");
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(resolvePath(tokens[1], currentDirectory)));
+        const auto column = vfs::analytics::columnIndex(table, tokens[2]);
+        const auto bins = vfs::analytics::histogram(table, column, tokens.size() == 4 ? parseSize(tokens[3], "bin count") : 10);
+        std::size_t maximum = 0;
+        for (const auto& bin : bins) maximum = std::max(maximum, bin.count);
+        for (const auto& bin : bins) {
+            const auto width = maximum == 0 ? 0 : bin.count * 40 / maximum;
+            std::cout << '[' << bin.lower << ',' << bin.upper << "] " << std::string(width, '#') << " " << bin.count << '\n';
+        }
+    } else if (command == "import") {
+        if (tokens.size() != 3) throw std::invalid_argument("usage: import HOST_PATH VFS_PATH");
+        const auto destination = resolvePath(tokens[2], currentDirectory);
+        importFromHost(filesystem, std::filesystem::path(tokens[1]), destination);
+        std::cout << "imported " << tokens[1] << " to " << destination << '\n';
+    } else if (command == "addgroup") {
+        requireCount(tokens, 2, "addgroup GROUP"); filesystem.addGroup(tokens[1]);
+        std::cout << "created group " << tokens[1] << '\n';
+    } else if (command == "groupadd") {
+        requireCount(tokens, 3, "groupadd USER GROUP"); filesystem.addUserToGroup(tokens[1], tokens[2]);
+        std::cout << "added " << tokens[1] << " to " << tokens[2] << '\n';
+    } else if (command == "chgrp") {
+        requireCount(tokens, 3, "chgrp PATH GROUP"); filesystem.chgrp(resolvePath(tokens[1], currentDirectory), tokens[2]);
+        std::cout << "group changed\n";
+    } else if (command == "groups") {
+        requireCount(tokens, 1, "groups");
+        for (const auto& group : filesystem.groups()) std::cout << group << '\n';
+    } else if (command == "history") {
+        requireCount(tokens, 1, "history");
+        const auto start = commandHistory.size() > 100 ? commandHistory.size() - 100 : 0;
+        for (std::size_t i = start; i < commandHistory.size(); ++i) std::cout << i + 1 << "  " << commandHistory[i] << '\n';
+    } else if (command == "source") {
+        requireCount(tokens, 2, "source HOST_SCRIPT");
+        if (scriptDepth >= 8) throw std::runtime_error("maximum nested script depth (8) exceeded");
+        std::ifstream script(tokens[1]);
+        if (!script) throw std::runtime_error("cannot open script: " + tokens[1]);
+        ++scriptDepth;
+        std::string scriptLine;
+        try {
+            while (std::getline(script, scriptLine)) {
+                if (scriptLine.empty() || scriptLine[0] == '#') continue;
+                recordHistory(scriptLine);
+                executeWithRedirection(filesystem, tokenize(scriptLine), currentDirectory);
+            }
+        } catch (...) { --scriptDepth; throw; }
+        --scriptDepth;
+    } else if (command == "fsck") {
+        requireCount(tokens, 1, "fsck");
+        const auto issues = filesystem.checkIntegrity();
+        if (issues.empty()) std::cout << "filesystem check passed\n";
+        else for (const auto& issue : issues) std::cout << "ERROR: " << issue << '\n';
+    } else if (command == "journal") {
+        requireCount(tokens, 1, "journal");
+        const auto report = filesystem.inspectJournal();
+        std::cout << (report.pending ? "pending: " : "status: ") << report.detail << '\n';
     } else if (command == "csv-info") {
         requireCount(tokens, 2, "csv-info PATH");
         const auto path = resolvePath(tokens[1], currentDirectory);
@@ -708,8 +897,9 @@ void execute(vfs::VirtualFileSystem& filesystem,
         }
         std::cout << "entry removed\n";
     } else if (command == "chmod") {
-        requireCount(tokens, 3, "chmod PATH rwx");
-        filesystem.chmod(resolvePath(tokens[1], currentDirectory), parsePermissions(tokens[2]));
+        if (tokens.size() == 3) filesystem.chmod(resolvePath(tokens[1], currentDirectory), parsePermissions(tokens[2]));
+        else if (tokens.size() == 5) filesystem.chmod(resolvePath(tokens[1], currentDirectory), parsePermissions(tokens[2]), parsePermissions(tokens[3]), parsePermissions(tokens[4]));
+        else throw std::invalid_argument("usage: chmod PATH OWNER_BITS [GROUP_BITS OTHER_BITS]");
         std::cout << "permissions updated\n";
     } else if (command == "access") {
         requireCount(tokens, 3, "access PATH r|w|x");
@@ -857,6 +1047,7 @@ int main(int argc, char* argv[]) {
         while (std::cout << "vfs[" << filesystem.currentUser() << "]:" << currentDirectory << "> " &&
                std::getline(std::cin, line)) {
             try {
+                if (!line.empty()) recordHistory(line);
                 executeWithRedirection(filesystem, tokenize(line), currentDirectory);
             } catch (const vfs::SimulatedCrash&) {
                 std::cout << "simulated crash: pending transaction is journaled; restart to recover\n";

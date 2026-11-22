@@ -316,4 +316,77 @@ std::vector<HistogramBin> histogram(const Table& table, std::size_t column,
     return bins;
 }
 
+
+double correlation(const Table& table, std::size_t xColumn, std::size_t yColumn) {
+    validateTable(table);
+    if (xColumn >= table.front().size() || yColumn >= table.front().size())
+        throw std::invalid_argument("CSV column index is out of range");
+    std::vector<std::pair<double, double>> values;
+    for (std::size_t row = 1; row < table.size(); ++row) {
+        const auto& xText = table[row][xColumn];
+        const auto& yText = table[row][yColumn];
+        if (xText.empty() || yText.empty()) continue;
+        double x = 0, y = 0;
+        if (!parseNumber(xText, x) || !parseNumber(yText, y))
+            throw std::invalid_argument("correlation columns must contain numeric values or blanks");
+        values.emplace_back(x, y);
+    }
+    if (values.size() < 2) throw std::invalid_argument("correlation requires at least two numeric row pairs");
+    double meanX = 0, meanY = 0;
+    for (const auto& pair : values) { meanX += pair.first; meanY += pair.second; }
+    meanX /= static_cast<double>(values.size()); meanY /= static_cast<double>(values.size());
+    double covariance = 0, varianceX = 0, varianceY = 0;
+    for (const auto& pair : values) {
+        const double dx = pair.first - meanX, dy = pair.second - meanY;
+        covariance += dx * dy; varianceX += dx * dx; varianceY += dy * dy;
+    }
+    if (varianceX == 0 || varianceY == 0) throw std::invalid_argument("correlation is undefined for a constant column");
+    return covariance / std::sqrt(varianceX * varianceY);
+}
+
+LinearRegression regress(const Table& table, std::size_t xColumn, std::size_t yColumn) {
+    validateTable(table);
+    if (xColumn >= table.front().size() || yColumn >= table.front().size())
+        throw std::invalid_argument("CSV column index is out of range");
+    std::vector<std::pair<double, double>> values;
+    for (std::size_t row = 1; row < table.size(); ++row) {
+        const auto& xText = table[row][xColumn];
+        const auto& yText = table[row][yColumn];
+        if (xText.empty() || yText.empty()) continue;
+        double x = 0, y = 0;
+        if (!parseNumber(xText, x) || !parseNumber(yText, y))
+            throw std::invalid_argument("regression columns must contain numeric values or blanks");
+        values.emplace_back(x, y);
+    }
+    if (values.size() < 2) throw std::invalid_argument("regression requires at least two numeric row pairs");
+    double meanX = 0, meanY = 0;
+    for (const auto& pair : values) { meanX += pair.first; meanY += pair.second; }
+    meanX /= static_cast<double>(values.size()); meanY /= static_cast<double>(values.size());
+    double covariance = 0, varianceX = 0, varianceY = 0;
+    for (const auto& pair : values) {
+        const double dx = pair.first - meanX, dy = pair.second - meanY;
+        covariance += dx * dy; varianceX += dx * dx; varianceY += dy * dy;
+    }
+    if (varianceX == 0) throw std::invalid_argument("regression is undefined for a constant predictor");
+    LinearRegression model;
+    model.count = values.size(); model.slope = covariance / varianceX;
+    model.intercept = meanY - model.slope * meanX;
+    model.rSquared = varianceY == 0 ? 1.0 : (covariance * covariance) / (varianceX * varianceY);
+    return model;
+}
+
+Table dropMissing(const Table& table, const std::vector<std::size_t>& columns) {
+    validateTable(table);
+    if (columns.empty()) throw std::invalid_argument("select at least one column for missing-value cleanup");
+    for (const auto column : columns)
+        if (column >= table.front().size()) throw std::invalid_argument("CSV column index is out of range");
+    Table result{table.front()};
+    for (std::size_t row = 1; row < table.size(); ++row) {
+        bool complete = true;
+        for (const auto column : columns) if (table[row][column].empty()) { complete = false; break; }
+        if (complete) result.push_back(table[row]);
+    }
+    return result;
+}
+
 } // namespace vfs::analytics

@@ -1,6 +1,7 @@
 #include "vfs.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -108,10 +109,13 @@ void VirtualFileSystem::recoverOrInitialize(std::size_t blockCount) {
     state_.blocks.resize(blockCount);
     state_.allocated.assign(blockCount, false);
     state_.users.insert("admin");
+    state_.groups["users"].insert("admin");
     Entry root;
     root.directory = true;
     root.owner = "admin";
     root.permissions = 7;
+    root.groupPermissions = 5;
+    root.createdMs = root.modifiedMs = nowMilliseconds();
     state_.entries.emplace("/", root);
     writeAtomic(diskPath_, serializeImage(state_));
     record("formatted new virtual disk");
@@ -126,12 +130,23 @@ std::uint32_t VirtualFileSystem::checksum(const std::string& data) {
     return hash;
 }
 
+std::uint64_t VirtualFileSystem::nowMilliseconds() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
 std::string VirtualFileSystem::serializeImage(const State& state) const {
     std::string body;
     appendInteger<std::uint32_t>(body, static_cast<std::uint32_t>(state.blocks.size()));
     appendInteger<std::uint32_t>(body, static_cast<std::uint32_t>(state.entries.size()));
     appendInteger<std::uint32_t>(body, static_cast<std::uint32_t>(state.users.size()));
     for (const auto& user : state.users) appendString(body, user);
+    appendInteger<std::uint32_t>(body, static_cast<std::uint32_t>(state.groups.size()));
+    for (const auto& group : state.groups) {
+        appendString(body, group.first);
+        appendInteger<std::uint32_t>(body, static_cast<std::uint32_t>(group.second.size()));
+        for (const auto& member : group.second) appendString(body, member);
+    }
     for (std::size_t index = 0; index < state.blocks.size(); ++index) {
         body.push_back(state.allocated[index] ? '\x01' : '\x00');
         body.append(state.blocks[index].data(), state.blocks[index].size());
@@ -144,9 +159,14 @@ std::string VirtualFileSystem::serializeImage(const State& state) const {
         appendInteger<std::uint64_t>(body, pair.second.size);
         appendInteger<std::uint32_t>(body, static_cast<std::uint32_t>(pair.second.blocks.size()));
         for (const auto block : pair.second.blocks) appendInteger<std::uint32_t>(body, block);
+        appendString(body, pair.second.group);
+        body.push_back(static_cast<char>(pair.second.groupPermissions));
+        body.push_back(static_cast<char>(pair.second.otherPermissions));
+        appendInteger<std::uint64_t>(body, pair.second.createdMs);
+        appendInteger<std::uint64_t>(body, pair.second.modifiedMs);
     }
     std::string image = "VFS2";
-    appendInteger<std::uint32_t>(image, 2);
+    appendInteger<std::uint32_t>(image, 3);
     appendInteger<std::uint64_t>(image, static_cast<std::uint64_t>(body.size()));
     appendInteger<std::uint32_t>(image, checksum(body));
     image.append(body);
@@ -161,7 +181,7 @@ VirtualFileSystem::State VirtualFileSystem::parseImage(const std::string& image)
     const auto version = readInteger<std::uint32_t>(image, offset);
     const auto bodySize = readInteger<std::uint64_t>(image, offset);
     const auto expectedChecksum = readInteger<std::uint32_t>(image, offset);
-    if (version != 2 || bodySize != image.size() - offset) {
+    if ((version != 2 && version != 3) || bodySize != image.size() - offset) {
         throw std::runtime_error("unsupported or malformed virtual disk image");
     }
     const auto body = image.substr(offset);
@@ -183,6 +203,24 @@ VirtualFileSystem::State VirtualFileSystem::parseImage(const std::string& image)
         if (user.empty() || !loaded.users.insert(user).second) {
             throw std::runtime_error("virtual disk contains an invalid user table");
         }
+    }
+    if (version >= 3) {
+        const auto groupCount = readInteger<std::uint32_t>(body, offset);
+        if (groupCount == 0 || groupCount > 10000) throw std::runtime_error("virtual disk group table is invalid");
+        for (std::uint32_t index = 0; index < groupCount; ++index) {
+            const auto name = readString(body, offset);
+            const auto memberCount = readInteger<std::uint32_t>(body, offset);
+            if (name.empty() || memberCount > userCount || loaded.groups.count(name))
+                throw std::runtime_error("virtual disk group table is invalid");
+            auto& members = loaded.groups[name];
+            for (std::uint32_t member = 0; member < memberCount; ++member) {
+                const auto username = readString(body, offset);
+                if (!loaded.users.count(username) || !members.insert(username).second)
+                    throw std::runtime_error("virtual disk group membership is invalid");
+            }
+        }
+    } else {
+        for (const auto& user : loaded.users) loaded.groups["users"].insert(user);
     }
     loaded.blocks.resize(blockCount);
     loaded.allocated.resize(blockCount);
@@ -212,6 +250,18 @@ VirtualFileSystem::State VirtualFileSystem::parseImage(const std::string& image)
                 throw std::runtime_error("file points to an invalid or free block");
             }
             entry.blocks.push_back(id);
+        }
+        if (version >= 3) {
+            entry.group = readString(body, offset);
+            if (offset + 2 > body.size()) throw std::runtime_error("disk entry permissions are truncated");
+            entry.groupPermissions = static_cast<std::uint8_t>(body[offset++]);
+            entry.otherPermissions = static_cast<std::uint8_t>(body[offset++]);
+            entry.createdMs = readInteger<std::uint64_t>(body, offset);
+            entry.modifiedMs = readInteger<std::uint64_t>(body, offset);
+            if (!loaded.groups.count(entry.group) || entry.groupPermissions > 7 || entry.otherPermissions > 7)
+                throw std::runtime_error("disk entry group metadata is invalid");
+        } else {
+            entry.group = "users";
         }
         if (entry.directory && (!entry.blocks.empty() || entry.size != 0)) {
             throw std::runtime_error("directory contains file data");
@@ -359,9 +409,16 @@ std::string VirtualFileSystem::resolved(const std::string& path) const {
 
 void VirtualFileSystem::requirePermission(const Entry& entry, std::uint8_t permission,
                                           const std::string& path) const {
-    if (currentUser_ != "admin" && (entry.permissions & permission) != permission) {
-        throw std::runtime_error("permission denied: " + path);
-    }
+    if (currentUser_ == "admin") return;
+    std::uint8_t granted = entry.otherPermissions;
+    if (entry.owner == currentUser_) granted = entry.permissions;
+    else if (userInGroup(currentUser_, entry.group)) granted = entry.groupPermissions;
+    if ((granted & permission) != permission) throw std::runtime_error("permission denied: " + path);
+}
+
+bool VirtualFileSystem::userInGroup(const std::string& user, const std::string& group) const {
+    const auto found = state_.groups.find(group);
+    return found != state_.groups.end() && found->second.count(user) != 0;
 }
 
 void VirtualFileSystem::requireDirectory(const std::string& path) const {
@@ -443,6 +500,7 @@ void VirtualFileSystem::writeUnlocked(State& candidate, const std::string& path,
     found = candidate.entries.find(path);
     found->second.blocks = std::move(blocks);
     found->second.size = contents.size();
+    found->second.modifiedMs = nowMilliseconds();
 }
 
 void VirtualFileSystem::login(const std::string& user) {
@@ -465,7 +523,38 @@ void VirtualFileSystem::addUser(const std::string& name) {
     }
     State candidate = state_;
     if (!candidate.users.insert(name).second) throw std::runtime_error("user already exists");
+    candidate.groups["users"].insert(name);
     commit(std::move(candidate), "created user " + name);
+}
+
+void VirtualFileSystem::addGroup(const std::string& name) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (currentUser_ != "admin") throw std::runtime_error("only admin can add groups");
+    if (name.empty() || name.size() > 64 || name.find_first_of("/\\:") != std::string::npos)
+        throw std::invalid_argument("invalid group name");
+    State candidate = state_;
+    if (candidate.groups.size() >= 10000) throw std::runtime_error("group limit reached");
+    if (!candidate.groups.emplace(name, std::set<std::string>{}).second)
+        throw std::runtime_error("group already exists");
+    commit(std::move(candidate), "created group " + name);
+}
+
+void VirtualFileSystem::addUserToGroup(const std::string& user, const std::string& group) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (currentUser_ != "admin") throw std::runtime_error("only admin can change group membership");
+    State candidate = state_;
+    if (!candidate.users.count(user)) throw std::runtime_error("unknown user: " + user);
+    const auto found = candidate.groups.find(group);
+    if (found == candidate.groups.end()) throw std::runtime_error("unknown group: " + group);
+    if (!found->second.insert(user).second) throw std::runtime_error("user is already in that group");
+    commit(std::move(candidate), "added " + user + " to group " + group);
+}
+
+std::vector<std::string> VirtualFileSystem::groups() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    std::vector<std::string> result;
+    for (const auto& group : state_.groups) result.push_back(group.first);
+    return result;
 }
 
 void VirtualFileSystem::makeDirectory(const std::string& input) {
@@ -480,6 +569,8 @@ void VirtualFileSystem::makeDirectory(const std::string& input) {
     entry.directory = true;
     entry.owner = currentUser_;
     entry.permissions = 7;
+    entry.groupPermissions = 5;
+    entry.createdMs = entry.modifiedMs = nowMilliseconds();
     candidate.entries.emplace(path, entry);
     commit(std::move(candidate), "created directory " + path);
 }
@@ -495,6 +586,8 @@ void VirtualFileSystem::createFile(const std::string& input) {
     Entry entry;
     entry.owner = currentUser_;
     entry.permissions = 6;
+    entry.groupPermissions = 4;
+    entry.createdMs = entry.modifiedMs = nowMilliseconds();
     candidate.entries.emplace(path, entry);
     commit(std::move(candidate), "created file " + path);
 }
@@ -538,11 +631,25 @@ std::vector<EntryInfo> VirtualFileSystem::list(const std::string& input) const {
     const auto found = state_.entries.find(path);
     if (found == state_.entries.end() || !found->second.directory) throw std::runtime_error("directory does not exist");
     requirePermission(found->second, 5, path);
+    auto entryChecksum = [this](const Entry& entry) {
+        if (entry.directory) return checksum(std::string{});
+        std::string contents;
+        contents.reserve(static_cast<std::size_t>(entry.size));
+        std::size_t remaining = static_cast<std::size_t>(entry.size);
+        for (const auto block : entry.blocks) {
+            const auto amount = std::min(remaining, BlockSize);
+            contents.append(state_.blocks[block].data(), amount);
+            remaining -= amount;
+        }
+        return checksum(contents);
+    };
     std::vector<EntryInfo> result;
     for (const auto& pair : state_.entries) {
         if (pair.first != path && parentPath(pair.first) == path) {
             result.push_back({pair.first, pair.second.directory, pair.second.owner,
-                              pair.second.permissions, pair.second.size, pair.second.blocks.size()});
+                              pair.second.permissions, pair.second.size, pair.second.blocks.size(),
+                              pair.second.group, pair.second.groupPermissions, pair.second.otherPermissions,
+                              pair.second.createdMs, pair.second.modifiedMs, entryChecksum(pair.second)});
         }
     }
     return result;
@@ -555,7 +662,10 @@ EntryInfo VirtualFileSystem::stat(const std::string& input) const {
     if (found == state_.entries.end()) throw std::runtime_error("path does not exist: " + path);
     requirePermission(found->second, found->second.directory ? 1 : 4, path);
     return {path, found->second.directory, found->second.owner,
-            found->second.permissions, found->second.size, found->second.blocks.size()};
+            found->second.permissions, found->second.size, found->second.blocks.size(),
+            found->second.group, found->second.groupPermissions, found->second.otherPermissions,
+            found->second.createdMs, found->second.modifiedMs,
+            checksum(found->second.directory ? std::string{} : readUnlocked(path))};
 }
 
 void VirtualFileSystem::renamePath(const std::string& sourceInput,
@@ -610,6 +720,19 @@ void VirtualFileSystem::removePath(const std::string& input) {
     commit(std::move(candidate), "removed " + path);
 }
 
+void VirtualFileSystem::chgrp(const std::string& input, const std::string& group) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    const auto path = resolved(input);
+    const auto found = state_.entries.find(path);
+    if (found == state_.entries.end()) throw std::runtime_error("path does not exist: " + path);
+    if (!state_.groups.count(group)) throw std::runtime_error("unknown group: " + group);
+    if (currentUser_ != "admin" && currentUser_ != found->second.owner)
+        throw std::runtime_error("only the owner or admin can change a file group");
+    State candidate = state_;
+    candidate.entries.at(path).group = group;
+    commit(std::move(candidate), "changed group on " + path + " to " + group);
+}
+
 void VirtualFileSystem::chmod(const std::string& input, std::uint8_t permissions) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (permissions > 7) throw std::invalid_argument("permissions must be between 0 and 7");
@@ -622,6 +745,60 @@ void VirtualFileSystem::chmod(const std::string& input, std::uint8_t permissions
     State candidate = state_;
     candidate.entries.at(path).permissions = permissions;
     commit(std::move(candidate), "changed permissions on " + path);
+}
+
+void VirtualFileSystem::chmod(const std::string& input, std::uint8_t owner,
+                              std::uint8_t group, std::uint8_t other) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (owner > 7 || group > 7 || other > 7)
+        throw std::invalid_argument("permission classes must be between 0 and 7");
+    const auto path = resolved(input);
+    const auto found = state_.entries.find(path);
+    if (found == state_.entries.end()) throw std::runtime_error("path does not exist: " + path);
+    if (currentUser_ != "admin" && currentUser_ != found->second.owner)
+        throw std::runtime_error("only the owner or admin can change permissions");
+    State candidate = state_;
+    auto& entry = candidate.entries.at(path);
+    entry.permissions = owner;
+    entry.groupPermissions = group;
+    entry.otherPermissions = other;
+    commit(std::move(candidate), "changed owner/group/other permissions on " + path);
+}
+
+std::vector<std::string> VirtualFileSystem::checkIntegrity() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    std::vector<std::string> issues;
+    try { (void)parseImage(serializeImage(state_)); }
+    catch (const std::exception& error) { issues.push_back(std::string("mounted state: ") + error.what()); }
+    try {
+        std::ifstream disk(diskPath_, std::ios::binary);
+        if (!disk) issues.push_back("disk image cannot be opened");
+        else {
+            const std::string image((std::istreambuf_iterator<char>(disk)), std::istreambuf_iterator<char>());
+            (void)parseImage(image);
+        }
+    } catch (const std::exception& error) { issues.push_back(std::string("disk image: ") + error.what()); }
+    return issues;
+}
+
+JournalReport VirtualFileSystem::inspectJournal() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    JournalReport report;
+    std::error_code error;
+    report.pending = std::filesystem::exists(journalPath_, error);
+    if (error) { report.detail = "cannot inspect journal: " + error.message(); return report; }
+    if (!report.pending) { report.valid = true; report.detail = "no pending journal"; return report; }
+    std::ifstream input(journalPath_, std::ios::binary);
+    if (!input) { report.detail = "pending journal cannot be opened"; return report; }
+    const std::string image((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    try {
+        (void)parseImage(image);
+        report.valid = true;
+        report.detail = "pending journal is valid and will be replayed on next mount";
+    } catch (const std::exception& exception) {
+        report.detail = std::string("pending journal is invalid: ") + exception.what();
+    }
+    return report;
 }
 
 DiskReport VirtualFileSystem::diskReport() const {

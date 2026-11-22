@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <set>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -30,7 +31,15 @@ struct EntryInfo {
     std::uint8_t permissions = 0;
     std::uint64_t size = 0;
     std::size_t allocatedBlocks = 0;
+    std::string group;
+    std::uint8_t groupPermissions = 0;
+    std::uint8_t otherPermissions = 0;
+    std::uint64_t createdMs = 0;
+    std::uint64_t modifiedMs = 0;
+    std::uint32_t checksum = 0;
 };
+
+struct JournalReport { bool pending = false; bool valid = false; std::string detail; };
 
 struct DiskReport {
     std::size_t totalBlocks = 0;
@@ -48,6 +57,9 @@ public:
     void login(const std::string& user);
     std::string currentUser() const;
     void addUser(const std::string& name);
+    void addGroup(const std::string& name);
+    void addUserToGroup(const std::string& user, const std::string& group);
+    std::vector<std::string> groups() const;
     void makeDirectory(const std::string& path);
     void createFile(const std::string& path);
     void writeFile(const std::string& path, const std::string& data);
@@ -58,7 +70,11 @@ public:
     EntryInfo stat(const std::string& path) const;
     void renamePath(const std::string& from, const std::string& to);
     void removePath(const std::string& path);
+    void chgrp(const std::string& path, const std::string& group);
     void chmod(const std::string& path, std::uint8_t permissions);
+    void chmod(const std::string& path, std::uint8_t owner, std::uint8_t group, std::uint8_t other);
+    std::vector<std::string> checkIntegrity() const;
+    JournalReport inspectJournal() const;
     DiskReport diskReport() const;
     std::vector<std::string> operationLog() const;
     void setCachePolicy(CachePolicy policy);
@@ -75,18 +91,26 @@ private:
         std::uint8_t permissions = 0;
         std::uint64_t size = 0;
         std::vector<std::uint32_t> blocks;
+        std::string group = "users";
+        std::uint8_t groupPermissions = 0;
+        std::uint8_t otherPermissions = 0;
+        std::uint64_t createdMs = 0;
+        std::uint64_t modifiedMs = 0;
     };
     struct State {
         std::vector<std::array<char, BlockSize>> blocks;
         std::vector<bool> allocated;
         std::map<std::string, Entry> entries;
         std::set<std::string> users;
+        std::map<std::string, std::set<std::string>> groups;
     };
 
     static std::string normalizePath(const std::string& path, const std::string& cwd);
     static std::string parentPath(const std::string& path);
     static std::string leafName(const std::string& path);
     static std::uint32_t checksum(const std::string& data);
+    bool userInGroup(const std::string& user, const std::string& group) const;
+    static std::uint64_t nowMilliseconds();
     void recoverOrInitialize(std::size_t blockCount);
     void commit(State candidate, const std::string& operation, bool simulateCrash = false);
     void writeAtomic(const std::filesystem::path& path, const std::string& data) const;

@@ -25,6 +25,8 @@ struct GroupSummary {
     double mean = 0;
 };
 
+struct LinearRegression { double slope = 0; double intercept = 0; double rSquared = 0; std::size_t count = 0; };
+
 struct HistogramBin {
     double lower = 0;
     double upper = 0;
@@ -47,5 +49,8 @@ Table innerJoin(const Table& left, const Table& right,
                 std::size_t leftKey, std::size_t rightKey);
 std::vector<HistogramBin> histogram(const Table& table, std::size_t column,
                                     std::size_t binCount);
+double correlation(const Table& table, std::size_t xColumn, std::size_t yColumn);
+LinearRegression regress(const Table& table, std::size_t xColumn, std::size_t yColumn);
+Table dropMissing(const Table& table, const std::vector<std::size_t>& columns);
 
 } // namespace vfs::analytics

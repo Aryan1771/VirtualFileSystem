@@ -58,6 +58,10 @@ void testPersistenceAndPaths() {
         filesystem.writeFile("/docs/nested/note.txt", contents);
         check(filesystem.readFile("/docs/nested/note.txt") == contents,
               "multi-block contents round-trip");
+        const auto info = filesystem.stat("/docs/nested/note.txt");
+        check(info.createdMs != 0 && info.modifiedMs >= info.createdMs && info.checksum != 0,
+              "metadata exposes timestamps and content checksum");
+        check(filesystem.checkIntegrity().empty(), "integrity checker validates mounted image");
         check(filesystem.diskReport().usedBlocks == 2, "two blocks allocated");
         filesystem.renamePath("/docs/nested", "/docs/archive");
         check(filesystem.stat("/docs/archive/note.txt").size == contents.size(),
@@ -85,14 +89,14 @@ void testPermissions() {
     filesystem.makeDirectory("/private");
     filesystem.createFile("/private/report.txt");
     filesystem.writeFile("/private/report.txt", "readable");
-    filesystem.chmod("/private/report.txt", 4);
+    filesystem.chmod("/private/report.txt", 4, 4, 0);
     filesystem.login("student");
     check(filesystem.readFile("/private/report.txt") == "readable",
           "granted read is allowed");
     expectFailure([&] { filesystem.writeFile("/private/report.txt", "denied"); },
                   "missing write is denied");
     filesystem.login("admin");
-    filesystem.chmod("/private/report.txt", 1);
+    filesystem.chmod("/private/report.txt", 1, 1, 0);
     filesystem.login("student");
     filesystem.checkAccess("/private/report.txt", 1);
     expectFailure([&] { filesystem.readFile("/private/report.txt"); },
@@ -107,17 +111,40 @@ void testPermissions() {
     cleanDisk(path);
 }
 
+void testGroups() {
+    const auto path = testDisk("groups");
+    vfs::VirtualFileSystem filesystem(path, 8);
+    filesystem.addUser("analyst");
+    filesystem.addGroup("research");
+    filesystem.addUserToGroup("analyst", "research");
+    filesystem.createFile("/dataset.csv");
+    filesystem.writeFile("/dataset.csv", "x\n1\n");
+    filesystem.chgrp("/dataset.csv", "research");
+    filesystem.chmod("/dataset.csv", 0, 4, 0);
+    filesystem.login("analyst");
+    check(filesystem.readFile("/dataset.csv") == "x\n1\n", "group read permission grants access to a member");
+    expectFailure([&] { filesystem.writeFile("/dataset.csv", "denied"); }, "group read does not grant write");
+    check(!filesystem.list("/").empty(), "listing metadata does not require read access to every file");
+    filesystem.login("admin");
+    check(filesystem.stat("/dataset.csv").group == "research", "entry group persists in metadata");
+    cleanDisk(path);
+}
+
 void testRecovery() {
     const auto path = testDisk("recovery");
     {
         vfs::VirtualFileSystem filesystem(path, 8);
         filesystem.createFile("/pending.txt");
+        const auto journal = filesystem.inspectJournal();
+        check(!journal.pending, "no pending journal before crash");
         try {
             filesystem.simulateCrashWrite("/pending.txt", "recovered content");
             check(false, "simulated crash must throw");
         } catch (const vfs::SimulatedCrash&) {
             check(std::filesystem::exists(path.string() + ".journal"),
                   "journal remains after simulated crash");
+            const auto report = filesystem.inspectJournal();
+            check(report.pending && report.valid, "journal inspection validates pending recovery image");
         }
     }
     {
@@ -242,6 +269,13 @@ void testAnalytics() {
     const auto joined = vfs::analytics::innerJoin(table, lookup, 0, 0);
     check(joined.size() == 4 && joined.front().size() == 4 && joined[1][3] == "Ada",
           "inner join matches rows on the selected key");
+    const auto model = vfs::analytics::regress(table, 1, 1);
+    check(model.count == 3 && model.slope == 1 && model.intercept == 0 && model.rSquared == 1,
+          "linear regression returns least-squares model");
+    check(vfs::analytics::correlation(table, 1, 1) == 1, "Pearson correlation handles identical columns");
+    const auto withMissing = vfs::analytics::parseCsv("a,b\n1,ok\n,skip\n3,yes\n");
+    check(vfs::analytics::dropMissing(withMissing, {0}).size() == 3,
+          "missing-value cleanup removes rows with selected blanks");
     expectFailure([] { vfs::analytics::parseCsv("a,b\n1\n"); },
                   "ragged CSV rows are rejected");
 }
@@ -252,6 +286,7 @@ int main() {
     try {
         testPersistenceAndPaths();
         testPermissions();
+        testGroups();
         testRecovery();
         testCacheAndDiskFull();
         testSchedulers();
