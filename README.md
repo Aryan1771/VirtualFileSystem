@@ -49,7 +49,7 @@ Keep the disk image and its `.journal` file together when moving or backing up a
 
 ## Commands
 
-Paths are virtual paths rooted at `/`. Commands accept quoted text so spaces can appear in file contents.
+The prompt shows the active user and current virtual directory. Paths are rooted at `/`; relative paths are resolved from the directory shown in the prompt, and `.` / `..` cannot escape the virtual root. Commands accept quoted text so spaces can appear in file contents. Linux-like commands operate only on the simulated disk, never on host files.
 
 | Command | Purpose |
 | --- | --- |
@@ -58,10 +58,18 @@ Paths are virtual paths rooted at `/`. Commands accept quoted text so spaces can
 | `write PATH "TEXT"` | Replace a file's contents |
 | `append PATH "TEXT"` | Append text to a file |
 | `cat PATH` | Read a file |
-| `ls [PATH]` | List direct children |
+| `head [-n COUNT] PATH` / `tail [-n COUNT] PATH` | Show the first or last lines of a file |
+| `wc PATH` | Count newline characters, words, and bytes |
+| `echo TEXT` | Print text to the terminal |
+| `pwd` / `cd [PATH]` | Show or change the current virtual directory |
+| `ls [-l] [PATH]` | List direct children and display the directory path |
+| `tree [PATH]` | Display nested files and directories |
+| `find [PATH] NAME` | Recursively find names containing text |
+| `cp SOURCE DEST` | Copy a virtual file |
+| `rmdir PATH` | Remove an empty directory |
 | `stat PATH` | Display entry metadata |
 | `mv SOURCE DEST` | Rename or move a file/directory |
-| `rm PATH` | Remove a file or directory tree |
+| `rm PATH` / `rm -r PATH` | Remove a file / recursively remove an entry tree |
 | `useradd NAME` | Add a user (admin only) |
 | `su USER` | Switch the active user |
 | `chmod PATH rwx` | Set permission bits; use `-` to clear a bit |
@@ -72,21 +80,31 @@ Paths are virtual paths rooted at `/`. Commands accept quoted text so spaces can
 | `schedule ALG HEAD R1,R2,... [up|down]` | Simulate disk scheduling |
 | `concurrent-read PATH [PATH ...]` | Read files using worker threads |
 | `log` | Show operations in this run |
+| `man [COMMAND]` | Show built-in command documentation |
+| `clear` | Clear a compatible terminal display |
 | `license` | Print the bundled GPL-3.0 license |
 | `help` / `exit` | Show commands / quit |
+
+`man` documents the built-in commands. This is a focused Linux-style filesystem CLI, not a general-purpose shell: commands run only against the virtual disk, and shell features such as pipes, redirection, executable programs, and host filesystem access are intentionally outside its scope.
 
 Example session:
 
 ```text
-vfs[admin]> mkdir /docs
-vfs[admin]> touch /docs/readme.txt
-vfs[admin]> write /docs/readme.txt "Persistent data"
-vfs[admin]> cat /docs/readme.txt
+vfs[admin]:/> mkdir /docs
+vfs[admin]:/> touch /docs/readme.txt
+vfs[admin]:/> write /docs/readme.txt "Persistent data"
+vfs[admin]:/> cd /docs
+vfs[admin]:/docs> pwd
+/docs
+vfs[admin]:/docs> ls
+Directory: /docs
+readme.txt
+vfs[admin]:/docs> cat readme.txt
 Persistent data
-vfs[admin]> useradd student
-vfs[admin]> chmod /docs/readme.txt r--
-vfs[admin]> su student
-vfs[student]> cat /docs/readme.txt
+vfs[admin]:/docs> useradd student
+vfs[admin]:/docs> chmod readme.txt r--
+vfs[admin]:/docs> su student
+vfs[student]:/docs> cat readme.txt
 Persistent data
 ```
 
