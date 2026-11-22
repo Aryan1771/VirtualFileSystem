@@ -49,7 +49,7 @@ Keep the disk image and its `.journal` file together when moving or backing up a
 
 ## Commands
 
-The prompt shows the active user and current virtual directory. Paths are rooted at `/`; relative paths are resolved from the directory shown in the prompt, and `.` / `..` cannot escape the virtual root. Commands accept quoted text so spaces can appear in file contents. Linux-like commands operate only on the simulated disk, never on host files.
+The prompt shows the active user and current virtual directory. Paths are rooted at `/`; relative paths are resolved from the directory shown in the prompt, and `.` / `..` cannot escape the virtual root. Commands accept quoted text; within quotes, `\n`, `\r`, and `\t` represent newline, carriage return, and tab. Linux-like commands operate only on the simulated disk, never on host files.
 
 | Command | Purpose |
 | --- | --- |
@@ -61,6 +61,10 @@ The prompt shows the active user and current virtual directory. Paths are rooted
 | `head [-n COUNT] PATH` / `tail [-n COUNT] PATH` | Show the first or last lines of a file |
 | `wc PATH` | Count newline characters, words, and bytes |
 | `echo TEXT` | Print text to the terminal |
+| `grep [-i] PATTERN PATH` | Search lines in a virtual text file |
+| `sort [-r] PATH` | Sort text-file lines |
+| `uniq [-c] PATH` | Collapse adjacent duplicate lines, optionally with counts |
+| `cut -d DELIM -f FIELDS PATH` | Select fields from delimiter-separated lines |
 | `pwd` / `cd [PATH]` | Show or change the current virtual directory |
 | `ls [-l] [PATH]` | List direct children and display the directory path |
 | `tree [PATH]` | Display nested files and directories |
@@ -82,10 +86,31 @@ The prompt shows the active user and current virtual directory. Paths are rooted
 | `log` | Show operations in this run |
 | `man [COMMAND]` | Show built-in command documentation |
 | `clear` | Clear a compatible terminal display |
+| `COMMAND > PATH` / `COMMAND >> PATH` | Save or append command output to a virtual file |
+| `csv-info PATH` | Show CSV dimensions and header names |
+| `describe PATH [COLUMN]` | Calculate numeric descriptive statistics |
+| `freq PATH COLUMN` | Count categorical values |
+| `filter PATH COLUMN OP VALUE` | Filter CSV rows |
+| `select PATH COLUMN[,COLUMN...]` | Select CSV columns |
+| `groupby PATH KEY [VALUE_COLUMN]` | Count categories or aggregate numeric groups |
+| `histogram PATH COLUMN [BINS]` | Bin numeric CSV values |
+| `join LEFT RIGHT KEY` | Inner-join CSV files on a shared header |
 | `license` | Print the bundled GPL-3.0 license |
 | `help` / `exit` | Show commands / quit |
 
-`man` documents the built-in commands. This is a focused Linux-style filesystem CLI, not a general-purpose shell: commands run only against the virtual disk, and shell features such as pipes, redirection, executable programs, and host filesystem access are intentionally outside its scope.
+`man` documents the built-in commands. This is a focused Linux-style filesystem CLI, not a general-purpose shell: commands run only against the virtual disk. Output redirection is supported; pipes, executable programs, and host filesystem access are outside its scope.
+
+### CSV analysis
+
+CSV files use the first row as headers, require a consistent number of fields per row, and support quoted fields, escaped quotes, and embedded newlines. Column arguments accept a header name or a 1-based column number. Numeric summaries skip empty values and report population standard deviation. Filter operators are `=`, `!=`, `>`, `>=`, `<`, `<=`, and `contains`.
+
+```text
+vfs[admin]:/> write /sales.csv "region,amount\nWest,120\nEast,75\nWest,90"
+vfs[admin]:/> csv-info /sales.csv
+vfs[admin]:/> describe /sales.csv amount
+vfs[admin]:/> groupby /sales.csv region amount > /regional-summary.csv
+vfs[admin]:/> cat /regional-summary.csv
+```
 
 Example session:
 

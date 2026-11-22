@@ -1,4 +1,5 @@
 #include "algorithms.hpp"
+#include "analytics.hpp"
 #include "vfs.hpp"
 #include "worker_pool.hpp"
 
@@ -208,6 +209,43 @@ void testWorkerPool() {
     cleanDisk(path);
 }
 
+void testAnalytics() {
+    const auto table = vfs::analytics::parseCsv(
+        "team,score,note\nBlue,10,\"good, work\"\nRed,20,\"said \"\"yes\"\"\"\nBlue,30,ok\n");
+    check(table.size() == 4 && table[1][2] == "good, work" && table[2][2] == "said \"yes\"",
+          "CSV parser handles quoted delimiters and escaped quotes");
+    check(vfs::analytics::parseCsv(vfs::analytics::writeCsv(table)) == table,
+          "CSV serialization round-trips quoted fields");
+    const auto score = vfs::analytics::summarizeNumeric(table, 1);
+    check(score.count == 3 && score.minimum == 10 && score.maximum == 30 &&
+          score.mean == 20 && score.median == 20,
+          "numeric summary reports descriptive statistics");
+    const auto filtered = vfs::analytics::filterRows(table, 1, ">", "15");
+    check(filtered.size() == 3 && filtered[1][0] == "Red",
+          "CSV filter compares numeric values");
+    const auto grouped = vfs::analytics::groupNumeric(table, 0, 1);
+    check(grouped.size() == 2 && grouped[0].key == "Blue" && grouped[0].count == 2 &&
+          grouped[0].sum == 40 && grouped[0].mean == 20,
+          "group-by aggregates numeric values by category");
+    const auto top = vfs::analytics::frequencies(table, 0);
+    check(top.size() == 2 && top[0].first == "Blue" && top[0].second == 2,
+          "frequency table is ordered by count");
+    const auto selected = vfs::analytics::selectColumns(
+        table, {vfs::analytics::columnIndex(table, "note"), 0});
+    check(selected[0] == std::vector<std::string>({"note", "team"}) &&
+          selected[1] == std::vector<std::string>({"good, work", "Blue"}),
+          "column selection preserves requested order");
+    const auto bins = vfs::analytics::histogram(table, 1, 2);
+    check(bins.size() == 2 && bins[0].count == 1 && bins[1].count == 2,
+          "histogram bins include boundary values");
+    const auto lookup = vfs::analytics::parseCsv("team,manager\nBlue,Ada\nRed,Lin\n");
+    const auto joined = vfs::analytics::innerJoin(table, lookup, 0, 0);
+    check(joined.size() == 4 && joined.front().size() == 4 && joined[1][3] == "Ada",
+          "inner join matches rows on the selected key");
+    expectFailure([] { vfs::analytics::parseCsv("a,b\n1\n"); },
+                  "ragged CSV rows are rejected");
+}
+
 } // namespace
 
 int main() {
@@ -219,6 +257,7 @@ int main() {
         testSchedulers();
         testCachePolicies();
         testWorkerPool();
+        testAnalytics();
         std::cout << "All " << assertions << " assertions passed.\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

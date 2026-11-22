@@ -1,3 +1,4 @@
+#include "analytics.hpp"
 #include "vfs.hpp"
 #include "worker_pool.hpp"
 
@@ -8,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -23,7 +25,10 @@ std::vector<std::string> tokenize(const std::string& line) {
     bool started = false;
     for (const char character : line) {
         if (escaped) {
-            token.push_back(character);
+            if (character == 'n') token.push_back('\n');
+            else if (character == 'r') token.push_back('\r');
+            else if (character == 't') token.push_back('\t');
+            else token.push_back(character);
             escaped = false;
             started = true;
         } else if (quoted && character == '\\') {
@@ -124,6 +129,44 @@ std::string baseName(const std::string& path) {
     return path.substr(separator == std::string::npos ? 0 : separator + 1);
 }
 
+std::vector<std::string> split(const std::string& value, char delimiter) {
+    std::vector<std::string> pieces;
+    std::stringstream stream(value);
+    std::string piece;
+    while (std::getline(stream, piece, delimiter)) {
+        if (piece.empty()) throw std::invalid_argument("list contains an empty item");
+        pieces.push_back(std::move(piece));
+    }
+    if (value.empty() || value.back() == delimiter)
+        throw std::invalid_argument("list contains an empty item");
+    return pieces;
+}
+
+std::vector<std::string> splitFields(const std::string& value, char delimiter) {
+    std::vector<std::string> fields;
+    std::size_t start = 0;
+    while (true) {
+        const auto end = value.find(delimiter, start);
+        fields.push_back(value.substr(start, end == std::string::npos
+            ? std::string::npos : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return fields;
+}
+
+std::vector<std::string> readLines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) lines.push_back(std::move(line));
+    return lines;
+}
+
+void printCsv(const vfs::analytics::Table& table) {
+    std::cout << vfs::analytics::writeCsv(table);
+}
+
 void showHelp() {
     std::cout
         << "Commands:\n"
@@ -142,6 +185,10 @@ void showHelp() {
         << "  tail [-n COUNT] PATH                      Show the last lines of a file\n"
         << "  wc PATH                                   Count lines, words, and bytes\n"
         << "  echo TEXT                                Print text\n"
+        << "  grep [-i] PATTERN PATH                    Search a virtual text file\n"
+        << "  sort [-r] PATH                            Sort text lines\n"
+        << "  uniq [-c] PATH                            Collapse adjacent duplicate lines\n"
+        << "  cut -d DELIM -f FIELDS PATH               Select delimited fields\n"
         << "  ls [-l] [PATH]                            List entries and show the directory\n"
         << "  tree [PATH]                               Display nested virtual entries\n"
         << "  find [PATH] NAME                          Find entries by name substring\n"
@@ -161,6 +208,14 @@ void showHelp() {
         << "  license                                   Display the bundled GPL-3.0 license\n"
         << "  man [COMMAND]                             Show built-in command documentation\n"
         << "  clear                                     Clear the terminal display\n"
+        << "  csv-info PATH                             Show CSV dimensions and columns\n"
+        << "  describe PATH [COLUMN]                    Summarize numeric CSV columns\n"
+        << "  freq PATH COLUMN                          Count categorical values\n"
+        << "  filter PATH COLUMN OP VALUE               Filter CSV rows\n"
+        << "  select PATH COLUMN[,COLUMN...]            Select CSV columns\n"
+        << "  groupby PATH KEY [VALUE_COLUMN]            Count groups or aggregate numbers\n"
+        << "  histogram PATH COLUMN [BINS]               Bin numeric CSV values\n"
+        << "  join LEFT RIGHT KEY                       Inner-join CSV files on a shared column\n"
         << "  crash-write PATH \"TEXT\"                   Leave a journal for next-run recovery\n"
         << "  exit                                      Quit\n";
 }
@@ -168,9 +223,9 @@ void showHelp() {
 void showMan(const std::string& command) {
     if (command.empty()) {
         std::cout << "Virtual File System manual\n"
-                  << "Pages: cd pwd ls tree find mkdir touch cp cat head tail wc echo write append mv rm rmdir "
+                  << "Pages: cd pwd ls tree find mkdir touch cp cat head tail wc echo grep sort uniq cut write append mv rm rmdir "
                      "chmod stat useradd su whoami access df schedule cache-policy cache-stats "
-                     "concurrent-read log crash-write clear license help exit\n"
+                     "concurrent-read csv-info describe freq filter select groupby histogram join log crash-write clear license help exit\n"
                   << "Use man COMMAND for syntax. Paths are rooted at / inside the virtual disk.\n";
         return;
     }
@@ -187,6 +242,10 @@ void showMan(const std::string& command) {
     else if (command == "tail") std::cout << "tail [-n COUNT] PATH - print the last COUNT lines (default 10) from a virtual file.\n";
     else if (command == "wc") std::cout << "wc PATH - print newline count, whitespace-delimited word count, and byte count.\n";
     else if (command == "echo") std::cout << "echo TEXT - print the supplied arguments separated by spaces. No shell redirection is performed.\n";
+    else if (command == "grep") std::cout << "grep [-i] PATTERN PATH - print virtual text-file lines containing PATTERN; -i ignores ASCII case.\n";
+    else if (command == "sort") std::cout << "sort [-r] PATH - print text-file lines in lexical order, optionally reversed.\n";
+    else if (command == "uniq") std::cout << "uniq [-c] PATH - collapse adjacent repeated lines; -c prefixes each run with its count.\n";
+    else if (command == "cut") std::cout << "cut -d DELIM -f FIELDS PATH - print selected 1-based fields from delimiter-separated lines.\n";
     else if (command == "write") std::cout << "write PATH \"TEXT\" - replace virtual file contents.\n";
     else if (command == "append") std::cout << "append PATH \"TEXT\" - append text to a virtual file.\n";
     else if (command == "mv") std::cout << "mv SOURCE DEST - rename or move a virtual entry.\n";
@@ -202,6 +261,14 @@ void showMan(const std::string& command) {
     else if (command == "schedule") std::cout << "schedule ALG HEAD R1,R2,... [up|down] - simulate FCFS, SSTF, SCAN, or C-SCAN.\n";
     else if (command == "cache-policy") std::cout << "cache-policy FIFO|LRU - select a simulated block-cache replacement policy.\n";
     else if (command == "cache-stats") std::cout << "cache-stats - show simulated cache hit and miss counters.\n";
+    else if (command == "csv-info") std::cout << "csv-info PATH - report CSV data rows, columns, and header names.\n";
+    else if (command == "describe") std::cout << "describe PATH [COLUMN] - report count, min, max, mean, median, and population standard deviation for numeric CSV columns.\n";
+    else if (command == "freq") std::cout << "freq PATH COLUMN - show categorical value counts in descending frequency order.\n";
+    else if (command == "filter") std::cout << "filter PATH COLUMN OP VALUE - filter CSV rows using =, !=, >, >=, <, <=, or contains. Numeric comparisons are numeric when both values parse as numbers.\n";
+    else if (command == "select") std::cout << "select PATH COLUMN[,COLUMN...] - project CSV columns by header name or 1-based index.\n";
+    else if (command == "groupby") std::cout << "groupby PATH KEY [VALUE_COLUMN] - count groups or report per-group count, sum, and mean for a numeric column.\n";
+    else if (command == "histogram") std::cout << "histogram PATH COLUMN [BINS] - print a numeric histogram with 1 to 1000 bins (default 10).\n";
+    else if (command == "join") std::cout << "join LEFT RIGHT KEY - inner-join two CSV files using the same named key column in both.\n";
     else if (command == "concurrent-read") std::cout << "concurrent-read PATH [PATH ...] - read virtual files using worker threads.\n";
     else if (command == "log") std::cout << "log - display this session's operation log.\n";
     else if (command == "crash-write") std::cout << "crash-write PATH \"TEXT\" - journal a write and exit to demonstrate startup recovery.\n";
@@ -337,6 +404,161 @@ void execute(vfs::VirtualFileSystem& filesystem,
             std::cout << tokens[index];
         }
         std::cout << '\n';
+    } else if (command == "grep") {
+        const bool ignoreCase = tokens.size() == 4 && tokens[1] == "-i";
+        if ((!ignoreCase && tokens.size() != 3) || (ignoreCase && tokens.size() != 4))
+            throw std::invalid_argument("usage: grep [-i] PATTERN PATH");
+        const auto pattern = tokens[ignoreCase ? 2 : 1];
+        const auto path = resolvePath(tokens[ignoreCase ? 3 : 2], currentDirectory);
+        const auto lines = readLines(filesystem.readFile(path));
+        std::string needle = pattern;
+        if (ignoreCase) std::transform(needle.begin(), needle.end(), needle.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        for (const auto& line : lines) {
+            auto candidate = line;
+            if (ignoreCase) std::transform(candidate.begin(), candidate.end(), candidate.begin(),
+                [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+            if (candidate.find(needle) != std::string::npos) std::cout << line << '\n';
+        }
+    } else if (command == "sort") {
+        const bool reverse = tokens.size() == 3 && tokens[1] == "-r";
+        if ((!reverse && tokens.size() != 2) || (reverse && tokens.size() != 3))
+            throw std::invalid_argument("usage: sort [-r] PATH");
+        const auto path = resolvePath(tokens[reverse ? 2 : 1], currentDirectory);
+        auto lines = readLines(filesystem.readFile(path));
+        std::stable_sort(lines.begin(), lines.end());
+        if (reverse) std::reverse(lines.begin(), lines.end());
+        for (const auto& line : lines) std::cout << line << '\n';
+    } else if (command == "uniq") {
+        const bool counts = tokens.size() == 3 && tokens[1] == "-c";
+        if ((!counts && tokens.size() != 2) || (counts && tokens.size() != 3))
+            throw std::invalid_argument("usage: uniq [-c] PATH");
+        const auto path = resolvePath(tokens[counts ? 2 : 1], currentDirectory);
+        const auto lines = readLines(filesystem.readFile(path));
+        for (std::size_t start = 0; start < lines.size();) {
+            std::size_t end = start + 1;
+            while (end < lines.size() && lines[end] == lines[start]) ++end;
+            if (counts) std::cout << std::setw(7) << (end - start) << ' ';
+            std::cout << lines[start] << '\n';
+            start = end;
+        }
+    } else if (command == "cut") {
+        requireCount(tokens, 6, "cut -d DELIM -f FIELDS PATH");
+        if (tokens[1] != "-d" || tokens[3] != "-f" || tokens[2].size() != 1)
+            throw std::invalid_argument("usage: cut -d DELIM -f FIELDS PATH (DELIM must be one character)");
+        std::vector<std::size_t> fields;
+        for (const auto& field : split(tokens[4], ',')) {
+            const auto number = parseSize(field, "field number");
+            if (number == 0) throw std::invalid_argument("field numbers start at 1");
+            fields.push_back(number - 1);
+        }
+        const auto path = resolvePath(tokens[5], currentDirectory);
+        const auto lines = readLines(filesystem.readFile(path));
+        const char delimiter = tokens[2][0];
+        for (const auto& line : lines) {
+            const auto values = splitFields(line, delimiter);
+            for (std::size_t index = 0; index < fields.size(); ++index) {
+                if (fields[index] >= values.size()) throw std::runtime_error("requested field is missing from a line");
+                if (index != 0) std::cout << delimiter;
+                std::cout << values[fields[index]];
+            }
+            std::cout << '\n';
+        }
+    } else if (command == "csv-info") {
+        requireCount(tokens, 2, "csv-info PATH");
+        const auto path = resolvePath(tokens[1], currentDirectory);
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(path));
+        if (table.empty()) throw std::runtime_error("CSV file is empty");
+        std::cout << "file: " << path << "\nrows: " << (table.size() - 1)
+                  << "\ncolumns: " << table.front().size() << "\nheader:\n";
+        for (std::size_t index = 0; index < table.front().size(); ++index)
+            std::cout << "  " << (index + 1) << ". " << table.front()[index] << '\n';
+    } else if (command == "describe") {
+        if (tokens.size() < 2 || tokens.size() > 3) throw std::invalid_argument("usage: describe PATH [COLUMN]");
+        const auto path = resolvePath(tokens[1], currentDirectory);
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(path));
+        if (table.empty()) throw std::runtime_error("CSV file is empty");
+        std::vector<std::size_t> columns;
+        if (tokens.size() == 3) columns.push_back(vfs::analytics::columnIndex(table, tokens[2]));
+        else for (std::size_t index = 0; index < table.front().size(); ++index) columns.push_back(index);
+        std::cout << "column,count,min,max,mean,median,stddev\n" << std::setprecision(6);
+        bool displayed = false;
+        for (const auto column : columns) {
+            try {
+                const auto summary = vfs::analytics::summarizeNumeric(table, column);
+                std::cout << vfs::analytics::writeCsv({{table.front()[column], std::to_string(summary.count),
+                    std::to_string(summary.minimum), std::to_string(summary.maximum),
+                    std::to_string(summary.mean), std::to_string(summary.median),
+                    std::to_string(summary.standardDeviation)}});
+                displayed = true;
+            } catch (const std::invalid_argument&) {
+                if (tokens.size() == 3) throw;
+            }
+        }
+        if (!displayed) std::cout << "(no numeric columns)\n";
+    } else if (command == "freq") {
+        requireCount(tokens, 3, "freq PATH COLUMN");
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(
+            resolvePath(tokens[1], currentDirectory)));
+        const auto column = vfs::analytics::columnIndex(table, tokens[2]);
+        vfs::analytics::Table output{{"value", "count"}};
+        for (const auto& item : vfs::analytics::frequencies(table, column))
+            output.push_back({item.first, std::to_string(item.second)});
+        printCsv(output);
+    } else if (command == "filter") {
+        requireCount(tokens, 5, "filter PATH COLUMN OP VALUE");
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(
+            resolvePath(tokens[1], currentDirectory)));
+        const auto column = vfs::analytics::columnIndex(table, tokens[2]);
+        printCsv(vfs::analytics::filterRows(table, column, tokens[3], tokens[4]));
+    } else if (command == "select") {
+        requireCount(tokens, 3, "select PATH COLUMN[,COLUMN...]");
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(
+            resolvePath(tokens[1], currentDirectory)));
+        std::vector<std::size_t> columns;
+        for (const auto& name : split(tokens[2], ','))
+            columns.push_back(vfs::analytics::columnIndex(table, name));
+        printCsv(vfs::analytics::selectColumns(table, columns));
+    } else if (command == "groupby") {
+        if (tokens.size() < 3 || tokens.size() > 4)
+            throw std::invalid_argument("usage: groupby PATH KEY [VALUE_COLUMN]");
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(
+            resolvePath(tokens[1], currentDirectory)));
+        const auto keyColumn = vfs::analytics::columnIndex(table, tokens[2]);
+        if (tokens.size() == 3) {
+            vfs::analytics::Table output{{table.front()[keyColumn], "count"}};
+            for (const auto& group : vfs::analytics::groupCounts(table, keyColumn))
+                output.push_back({group.key, std::to_string(group.count)});
+            printCsv(output);
+        } else {
+            const auto valueColumn = vfs::analytics::columnIndex(table, tokens[3]);
+            vfs::analytics::Table output{{table.front()[keyColumn], "count", "sum", "mean"}};
+            for (const auto& group : vfs::analytics::groupNumeric(table, keyColumn, valueColumn))
+                output.push_back({group.key, std::to_string(group.count),
+                    std::to_string(group.sum), std::to_string(group.mean)});
+            printCsv(output);
+        }
+    } else if (command == "histogram") {
+        if (tokens.size() < 3 || tokens.size() > 4)
+            throw std::invalid_argument("usage: histogram PATH COLUMN [BINS]");
+        const auto table = vfs::analytics::parseCsv(filesystem.readFile(
+            resolvePath(tokens[1], currentDirectory)));
+        const auto column = vfs::analytics::columnIndex(table, tokens[2]);
+        const auto count = tokens.size() == 4 ? parseSize(tokens[3], "bin count") : 10;
+        vfs::analytics::Table output{{"lower", "upper", "count"}};
+        for (const auto& bin : vfs::analytics::histogram(table, column, count))
+            output.push_back({std::to_string(bin.lower), std::to_string(bin.upper),
+                              std::to_string(bin.count)});
+        printCsv(output);
+    } else if (command == "join") {
+        requireCount(tokens, 4, "join LEFT RIGHT KEY");
+        const auto left = vfs::analytics::parseCsv(filesystem.readFile(
+            resolvePath(tokens[1], currentDirectory)));
+        const auto right = vfs::analytics::parseCsv(filesystem.readFile(
+            resolvePath(tokens[2], currentDirectory)));
+        const auto leftKey = vfs::analytics::columnIndex(left, tokens[3]);
+        const auto rightKey = vfs::analytics::columnIndex(right, tokens[3]);
+        printCsv(vfs::analytics::innerJoin(left, right, leftKey, rightKey));
     } else if (command == "ls") {
         std::size_t argument = 1;
         const bool longFormat = tokens.size() > 1 && tokens[1] == "-l";
@@ -488,6 +710,48 @@ void execute(vfs::VirtualFileSystem& filesystem,
     }
 }
 
+void executeWithRedirection(vfs::VirtualFileSystem& filesystem,
+                            const std::vector<std::string>& tokens,
+                            std::string& currentDirectory) {
+    const auto redirect = std::find_if(tokens.begin(), tokens.end(), [](const std::string& token) {
+        return token == ">" || token == ">>";
+    });
+    if (redirect == tokens.end()) {
+        execute(filesystem, tokens, currentDirectory);
+        return;
+    }
+    const auto position = static_cast<std::size_t>(std::distance(tokens.begin(), redirect));
+    if (position == 0 || position + 2 != tokens.size())
+        throw std::invalid_argument("redirection usage: COMMAND > PATH or COMMAND >> PATH");
+    const bool append = *redirect == ">>";
+    const auto destination = resolvePath(tokens[position + 1], currentDirectory);
+    std::vector<std::string> command(tokens.begin(), redirect);
+    std::ostringstream captured;
+    auto* previous = std::cout.rdbuf(captured.rdbuf());
+    try {
+        execute(filesystem, command, currentDirectory);
+    } catch (...) {
+        std::cout.rdbuf(previous);
+        throw;
+    }
+    std::cout.rdbuf(previous);
+    const auto output = captured.str();
+    bool created = false;
+    try {
+        filesystem.createFile(destination);
+        created = true;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()) != "path already exists") throw;
+    }
+    try {
+        if (append && !created) filesystem.appendFile(destination, output);
+        else filesystem.writeFile(destination, output);
+    } catch (...) {
+        if (created) filesystem.removePath(destination);
+        throw;
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -515,7 +779,7 @@ int main(int argc, char* argv[]) {
         while (std::cout << "vfs[" << filesystem.currentUser() << "]:" << currentDirectory << "> " &&
                std::getline(std::cin, line)) {
             try {
-                execute(filesystem, tokenize(line), currentDirectory);
+                executeWithRedirection(filesystem, tokenize(line), currentDirectory);
             } catch (const vfs::SimulatedCrash&) {
                 std::cout << "simulated crash: pending transaction is journaled; restart to recover\n";
                 return 77;

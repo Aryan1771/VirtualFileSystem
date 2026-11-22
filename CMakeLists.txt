@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(vfs_core
     src/vfs.cpp
+    src/analytics.cpp
     src/algorithms.cpp
     src/worker_pool.cpp
 )
